@@ -1,0 +1,16 @@
+services:
+  sdmserver:
+    image: lmangone/sdmserver:v0.1
+    container_name: sdmserver
+    restart: unless-stopped
+    user: "568:568"
+    ports:
+      - "5900:5900"
+    volumes:
+      - /mnt/naspool/Media/Downloads:/app/downloads
+      - /mnt/naspool/Applications/sdmserver/config:/app/config
+    environment:
+      - DOWNLOAD_DIR=/app/downloads
+      - MAX_CONCURRENT_DOWNLOADS=3
+      - RUST_LOG=info
+      - PORT=5900

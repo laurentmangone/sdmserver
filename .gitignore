@@ -1,0 +1,22 @@
+# Rust
+/target/
+Cargo.lock
+
+# Docker
+.dockerignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Downloads (runtime data)
+downloads/
+
+# Logs
+*.log

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Super Download Manager Server</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Super Download Manager Server</h1>
+            <div class="health-status" id="health">
+                <span class="status-dot"></span>
+                <span>Connecting...</span>
+            </div>
+        </header>
+
+        <main>
+            <section class="add-download">
+                <h2>Add Download</h2>
+                <form id="download-form">
+                    <input type="url" id="url-input" placeholder="Enter URL to download..." required>
+                    <button type="submit">Download</button>
+                </form>
+                <div class="batch-upload">
+                    <p>Or upload a file with URLs (one per line):</p>
+                    <input type="file" id="file-input" accept=".txt">
+                    <button type="button" id="batch-btn">Add from File</button>
+                </div>
+            </section>
+
+            <section class="downloads-list">
+                <h2>Downloads</h2>
+                <div id="downloads-container">
+                    <p class="empty-state">No downloads yet</p>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/app.js?v=2"></script>
+</body>
+</html>
