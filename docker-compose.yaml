@@ -1,16 +1,22 @@
 services:
   sdmserver:
-    image: lmangone/sdmserver:v0.1
+    image: lmangone/sdmserver:latest
     container_name: sdmserver
     restart: unless-stopped
-    user: "568:568"
     ports:
       - "5900:5900"
     volumes:
-      - /mnt/naspool/Media/Downloads:/app/downloads
-      - /mnt/naspool/Applications/sdmserver/config:/app/config
+      - ./downloads:/app/downloads
+      - ./config:/app/config
     environment:
-      - DOWNLOAD_DIR=/app/downloads
-      - MAX_CONCURRENT_DOWNLOADS=3
-      - RUST_LOG=info
       - PORT=5900
+      - DOWNLOAD_DIR=/app/downloads
+      - CONFIG_DIR=/app/config
+      - MAX_CONCURRENT_DOWNLOADS=3
+      - REQUEST_TIMEOUT=3600
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5900/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

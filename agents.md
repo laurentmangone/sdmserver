@@ -94,7 +94,9 @@ services:
       - ./config:/app/config
     environment:
       - DOWNLOAD_DIR=/app/downloads
+      - CONFIG_DIR=/app/config
       - MAX_CONCURRENT_DOWNLOADS=3
+      - REQUEST_TIMEOUT=3600
       - RUST_LOG=info
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
@@ -102,6 +104,24 @@ services:
       timeout: 10s
       retries: 3
 ```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 5900 | Server port |
+| `DOWNLOAD_DIR` | /app/downloads | Download output directory |
+| `CONFIG_DIR` | /app/config | Configuration and state file directory |
+| `MAX_CONCURRENT_DOWNLOADS` | 3 | Maximum concurrent downloads |
+| `REQUEST_TIMEOUT` | 3600 | HTTP request timeout in seconds |
+| `RUST_LOG` | info | Logging level |
+
+## State Persistence
+
+Download state is persisted to `CONFIG_DIR/downloads.json`. This allows:
+- Downloads with status `Queued` or `Failed` to be restored on restart
+- Resume interrupted downloads after container restart
+- State is automatically saved on every download modification
 
 ## TrueNAS Scale Deployment Notes
 
@@ -111,6 +131,7 @@ services:
    - `/mnt/pool/sdmserver/downloads` -> `/app/downloads`
    - `/mnt/pool/sdmserver/config` -> `/app/config`
 4. Set appropriate permissions (UID 1000 or match container user)
+5. State is automatically persisted to `config/downloads.json`
 
 ## Implementation Priorities
 

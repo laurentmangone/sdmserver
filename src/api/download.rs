@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -8,10 +7,10 @@ use axum::{
     Router,
 };
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::models::{CreateDownloadRequest, Download, DownloadProgress, DownloadStatus};
-use crate::services::Downloader;
 use crate::state::AppState;
 
 type SharedState = Arc<RwLock<AppState>>;
@@ -22,20 +21,60 @@ struct BatchResult {
     ids: Vec<Uuid>,
 }
 
+#[derive(serde::Serialize)]
+struct Settings {
+    max_concurrent: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateSettings {
+    max_concurrent: usize,
+}
+
 pub fn router() -> Router<SharedState> {
     Router::new()
-        .route("/health", axum::routing::get(health_check))
-        .route("/downloads", get(list_downloads))
-        .route("/downloads", post(create_download))
-        .route("/downloads/batch", post(create_batch_downloads))
-        .route("/downloads/:id", get(get_download))
-        .route("/downloads/:id", delete(delete_download))
-        .route("/downloads/:id/cancel", post(cancel_download))
-        .route("/downloads/:id/retry", post(retry_download))
+        .route("/api/health", axum::routing::get(health_check))
+        .route("/api/settings", get(get_settings))
+        .route("/api/settings", post(update_settings))
+        .route("/api/downloads", get(list_downloads))
+        .route("/api/downloads", post(create_download))
+        .route("/api/downloads/batch", post(create_batch_downloads))
+        .route("/api/downloads/:id", get(get_download))
+        .route("/api/downloads/:id", delete(delete_download))
+        .route("/api/downloads/:id/file", delete(delete_download_with_file))
+        .route("/api/downloads/:id/cancel", post(cancel_download))
+        .route("/api/downloads/:id/retry", post(retry_download))
 }
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+async fn get_settings(State(state): State<SharedState>) -> Json<Settings> {
+    let state = state.read().await;
+    Json(Settings {
+        max_concurrent: state.max_concurrent,
+    })
+}
+
+async fn update_settings(
+    State(state): State<SharedState>,
+    Json(payload): Json<UpdateSettings>,
+) -> Result<Json<Settings>, StatusCode> {
+    if payload.max_concurrent < 1 || payload.max_concurrent > 20 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut state = state.write().await;
+    state.max_concurrent = payload.max_concurrent;
+    state.reload_semaphore();
+    state.save_config().await;
+
+    tracing::info!("Settings updated: max_concurrent={}", state.max_concurrent);
+
+    Ok(Json(Settings {
+        max_concurrent: state.max_concurrent,
+    }))
 }
 
 async fn list_downloads(State(state): State<SharedState>) -> Json<Vec<DownloadProgress>> {
@@ -52,53 +91,46 @@ async fn create_download(
 
     {
         let mut state = state.write().await;
-        state.add_download(download);
+        state.add_download(download.clone());
+        state.save_to_file().await;
     }
 
-    let download_dir = {
+    let downloader = {
         let state = state.read().await;
-        state.download_dir.clone()
+        state.downloader.clone()
     };
-
-    let max_concurrent = {
+    let semaphore = {
         let state = state.read().await;
-        state.max_concurrent
+        state.download_semaphore.clone()
     };
-
-    let downloader = std::sync::Arc::new(Downloader::new());
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        loop {
-            let active_count = {
-                let state = state_clone.read().await;
-                state.active_count()
-            };
+        let permit = semaphore.acquire().await.unwrap();
 
-            if active_count < max_concurrent {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        let progress_callback = |d: Download| {
-            let state = state_clone.clone();
-            tokio::spawn(async move {
-                let mut state = state.write().await;
-                if let Some(download) = state.get_download_mut(d.id) {
-                    *download = d;
-                }
-            });
-        };
-
-        let downloader = downloader.as_ref();
         let download = {
             let state = state_clone.read().await;
             state.get_download(download_id).cloned().unwrap()
         };
+        let download_dir = {
+            let state = state_clone.read().await;
+            state.download_dir.clone()
+        };
 
-        let result = downloader.start_download(download, download_dir, progress_callback).await;
+        let state_for_callback = state_clone.clone();
+        let progress_callback = move |d: Download| {
+            let state_inner = state_for_callback.clone();
+            let downloaded = d.clone();
+            tokio::spawn(async move {
+                let mut state = state_inner.write().await;
+                if let Some(download) = state.get_download_mut(downloaded.id) {
+                    *download = downloaded;
+                }
+                state.save_to_file().await;
+            });
+        };
+
+        let result = downloader.start_download(download, download_dir, progress_callback, permit).await;
 
         let mut state = state_clone.write().await;
         if let Some(d) = state.get_download_mut(download_id) {
@@ -106,6 +138,7 @@ async fn create_download(
                 *d = completed;
             }
         }
+        state.save_to_file().await;
     });
 
     let state = state.read().await;
@@ -133,10 +166,25 @@ async fn delete_download(
 ) -> Result<StatusCode, StatusCode> {
     let mut state = state.write().await;
 
+    if state.remove_download(id).is_some() {
+        state.save_to_file().await;
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+async fn delete_download_with_file(
+    State(state): State<SharedState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let mut state = state.write().await;
+
     if let Some(download) = state.remove_download(id) {
         if let Some(path) = download.file_path {
             let _ = tokio::fs::remove_file(path).await;
         }
+        state.save_to_file().await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(StatusCode::NOT_FOUND)
@@ -147,10 +195,18 @@ async fn cancel_download(
     State(state): State<SharedState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
+    let downloader = {
+        let state = state.read().await;
+        state.downloader.clone()
+    };
+
+    downloader.cancel_download(id);
+
     let mut state = state.write().await;
 
     if let Some(download) = state.get_download_mut(id) {
         download.status = DownloadStatus::Cancelled;
+        state.save_to_file().await;
         Ok(StatusCode::OK)
     } else {
         Err(StatusCode::NOT_FOUND)
@@ -171,56 +227,51 @@ async fn retry_download(
             download.downloaded_bytes = 0;
             download.progress_percent();
             download.error_message = None;
-            download.clone()
+            let result = download.clone();
+            state.save_to_file().await;
+            result
         } else {
             return Err(StatusCode::NOT_FOUND);
         }
     };
 
     let download_id = download.id;
-    let download_dir = {
+    let downloader = {
         let state = state.read().await;
-        state.download_dir.clone()
+        state.downloader.clone()
     };
-
-    let max_concurrent = {
+    let semaphore = {
         let state = state.read().await;
-        state.max_concurrent
+        state.download_semaphore.clone()
     };
-
-    let downloader = std::sync::Arc::new(Downloader::new());
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        loop {
-            let active_count = {
-                let state = state_clone.read().await;
-                state.active_count()
-            };
+        let permit = semaphore.acquire().await.unwrap();
 
-            if active_count < max_concurrent {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        let progress_callback = |d: Download| {
-            let state = state_clone.clone();
-            tokio::spawn(async move {
-                let mut state = state.write().await;
-                if let Some(download) = state.get_download_mut(d.id) {
-                    *download = d;
-                }
-            });
-        };
-
-        let downloader = downloader.as_ref();
         let download = {
             let state = state_clone.read().await;
             state.get_download(download_id).cloned().unwrap()
         };
+        let download_dir = {
+            let state = state_clone.read().await;
+            state.download_dir.clone()
+        };
 
-        let result = downloader.start_download(download, download_dir, progress_callback).await;
+        let state_for_callback = state_clone.clone();
+        let progress_callback = move |d: Download| {
+            let state_inner = state_for_callback.clone();
+            let downloaded = d.clone();
+            tokio::spawn(async move {
+                let mut state = state_inner.write().await;
+                if let Some(download) = state.get_download_mut(downloaded.id) {
+                    *download = downloaded;
+                }
+                state.save_to_file().await;
+            });
+        };
+
+        let result = downloader.start_download(download, download_dir, progress_callback, permit).await;
 
         let mut state = state_clone.write().await;
         if let Some(d) = state.get_download_mut(download_id) {
@@ -228,6 +279,7 @@ async fn retry_download(
                 *d = completed;
             }
         }
+        state.save_to_file().await;
     });
 
     let state = state.read().await;
@@ -257,63 +309,83 @@ async fn create_batch_downloads(
             ids.push(download.id);
             state.add_download(download);
         }
+        state.save_to_file().await;
     }
 
-    let download_dir = {
+    let downloader = {
         let state = state.read().await;
-        state.download_dir.clone()
+        state.downloader.clone()
     };
-
-    let max_concurrent = {
+    let semaphore = {
         let state = state.read().await;
-        state.max_concurrent
+        state.download_semaphore.clone()
     };
 
     let state_clone = state.clone();
     let download_ids = ids.clone();
 
     tokio::spawn(async move {
+        let mut handles = Vec::new();
+        
         for download_id in download_ids {
-            loop {
-                let active_count = {
-                    let state = state_clone.read().await;
-                    state.active_count()
+            let semaphore = {
+                let state = state_clone.read().await;
+                state.download_semaphore.clone()
+            };
+            let downloader = {
+                let state = state_clone.read().await;
+                state.downloader.clone()
+            };
+            let download_dir = {
+                let state = state_clone.read().await;
+                state.download_dir.clone()
+            };
+            let state_for_callback = state_clone.clone();
+            let download_id_for_handler = download_id;
+
+            let handle = tokio::spawn(async move {
+                let permit = semaphore.acquire().await.unwrap();
+
+                let download = {
+                    let state = state_for_callback.read().await;
+                    state.get_download(download_id_for_handler).cloned()
                 };
 
-                if active_count < max_concurrent {
-                    break;
+                if download.is_none() {
+                    return;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
 
-            let progress_callback = |d: Download| {
-                let state = state_clone.clone();
-                tokio::spawn(async move {
-                    let mut state = state.write().await;
-                    if let Some(download) = state.get_download_mut(d.id) {
-                        *download = d;
-                    }
-                });
-            };
+                let download_for_callback = download.unwrap();
+                let state_for_callback2 = state_for_callback.clone();
 
-            let downloader = std::sync::Arc::new(Downloader::new());
-            let downloader = downloader.as_ref();
+                let progress_callback = move |d: Download| {
+                    let state_inner = state_for_callback2.clone();
+                    let downloaded = d.clone();
+                    tokio::spawn(async move {
+                        let mut state = state_inner.write().await;
+                        if let Some(download) = state.get_download_mut(downloaded.id) {
+                            *download = downloaded;
+                        }
+                        state.save_to_file().await;
+                    });
+                };
 
-            let download = {
-                let state = state_clone.read().await;
-                state.get_download(download_id).cloned()
-            };
+                let result = downloader.start_download(download_for_callback, download_dir, progress_callback, permit).await;
 
-            if let Some(download) = download {
-                let result = downloader.start_download(download, download_dir.clone(), progress_callback).await;
-
-                let mut state = state_clone.write().await;
-                if let Some(d) = state.get_download_mut(download_id) {
+                let mut state = state_for_callback.write().await;
+                if let Some(d) = state.get_download_mut(download_id_for_handler) {
                     if let Ok(completed) = result {
                         *d = completed;
                     }
                 }
-            }
+                state.save_to_file().await;
+            });
+            
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let _ = handle.await;
         }
     });
 

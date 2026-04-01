@@ -1,4 +1,7 @@
-const API_BASE = '';
+const API_BASE = '/api';
+
+let currentFilter = 'all';
+let allDownloads = [];
 
 const statusNames = {
     queued: 'Queued',
@@ -48,7 +51,7 @@ function createDownloadElement(download) {
             ${download.status === 'failed' ? `
                 <button class="btn-retry" onclick="retryDownload('${download.id}')">Retry</button>
             ` : ''}
-            <button class="btn-delete" onclick="deleteDownload('${download.id}')">Delete</button>
+            <button class="btn-delete" onclick="showDeleteMenu(event, '${download.id}', ${download.file_path !== null})">Delete ▾</button>
         </div>
     `;
 
@@ -87,16 +90,56 @@ async function createDownload(url) {
     return await response.json();
 }
 
-async function deleteDownload(id) {
-    if (!confirm('Are you sure you want to delete this download?')) return;
+async function deleteDownload(id, withFile = false) {
+    const menu = document.querySelector('.delete-menu');
+    if (menu) menu.remove();
 
-    const response = await fetch(`${API_BASE}/downloads/${id}`, {
+    let message = 'Remove from list only?';
+    if (withFile) {
+        message = 'Are you sure you want to delete this download and its file from disk?';
+    }
+    if (!confirm(message)) return;
+
+    const endpoint = withFile ? `/downloads/${id}/file` : `/downloads/${id}`;
+    const response = await fetch(`${API_BASE}${endpoint}`, {
         method: 'DELETE'
     });
 
     if (!response.ok) {
         alert('Failed to delete download');
     }
+}
+
+function showDeleteMenu(event, downloadId, hasFile) {
+    event.stopPropagation();
+    
+    const existingMenu = document.querySelector('.delete-menu');
+    if (existingMenu) {
+        existingMenu.remove();
+        return;
+    }
+
+    const menu = document.createElement('div');
+    menu.className = 'delete-menu';
+    menu.innerHTML = `
+        <button onclick="deleteDownload('${downloadId}', false)">Remove from list only</button>
+        ${hasFile ? `<button onclick="deleteDownload('${downloadId}', true)">Remove list + file</button>` : ''}
+        <button class="cancel-btn" onclick="this.closest('.delete-menu').remove()">Cancel</button>
+    `;
+    
+    const actionsDiv = event.target.closest('.download-actions');
+    actionsDiv.appendChild(menu);
+    
+    const closeHandler = function(e) {
+        if (!menu.contains(e.target) && !event.target.closest('.btn-delete')) {
+            menu.remove();
+            document.removeEventListener('click', closeHandler);
+        }
+    };
+    
+    setTimeout(() => {
+        document.addEventListener('click', closeHandler);
+    }, 50);
 }
 
 async function cancelDownload(id) {
@@ -140,16 +183,31 @@ async function checkHealth() {
 }
 
 async function updateUI() {
+    if (document.querySelector('.delete-menu')) return;
+    
     const downloads = await fetchDownloads();
+    allDownloads = downloads;
+    
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+        const filter = btn.dataset.filter;
+        const count = filter === 'all' ? downloads.length : downloads.filter(d => d.status === filter).length;
+        btn.querySelector('.count').textContent = `(${count})`;
+    });
+    
+    const filteredDownloads = currentFilter === 'all' 
+        ? downloads 
+        : downloads.filter(d => d.status === currentFilter);
+    
     const container = document.getElementById('downloads-container');
 
-    if (downloads.length === 0) {
-        container.innerHTML = '<p class="empty-state">No downloads yet</p>';
+    if (filteredDownloads.length === 0) {
+        const statusLabel = currentFilter === 'all' ? '' : currentFilter + ' ';
+        container.innerHTML = `<p class="empty-state">No ${statusLabel}downloads</p>`;
         return;
     }
 
     container.innerHTML = '';
-    downloads.forEach(download => {
+    filteredDownloads.forEach(download => {
         container.appendChild(createDownloadElement(download));
     });
 }
@@ -212,6 +270,62 @@ document.getElementById('batch-btn').addEventListener('click', async () => {
         button.textContent = 'Add from File';
     }
 });
+
+document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        e.target.classList.add('active');
+        currentFilter = e.target.dataset.filter;
+        updateUI();
+    });
+});
+
+async function loadSettings() {
+    try {
+        const response = await fetch(`${API_BASE}/settings`);
+        if (response.ok) {
+            const settings = await response.json();
+            document.getElementById('max-concurrent').value = settings.max_concurrent;
+        }
+    } catch (error) {
+        console.error('Error loading settings:', error);
+    }
+}
+
+function showSettings() {
+    loadSettings();
+    document.getElementById('settings-modal').classList.add('show');
+}
+
+function closeSettings() {
+    document.getElementById('settings-modal').classList.remove('show');
+}
+
+async function saveSettings() {
+    const maxConcurrent = parseInt(document.getElementById('max-concurrent').value);
+    
+    if (maxConcurrent < 1 || maxConcurrent > 20) {
+        alert('Max concurrent downloads must be between 1 and 20');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/settings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ max_concurrent: maxConcurrent })
+        });
+        
+        if (response.ok) {
+            closeSettings();
+            alert('Settings saved!');
+        } else {
+            alert('Failed to save settings');
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
 
 checkHealth();
 updateUI();
