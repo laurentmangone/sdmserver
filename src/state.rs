@@ -58,6 +58,7 @@ impl AppState {
                 match serde_json::from_str::<AppConfig>(&content) {
                     Ok(config) => {
                         self.max_concurrent = config.max_concurrent;
+                        self.reload_semaphore();
                         info!("Loaded config: max_concurrent={}", self.max_concurrent);
                     }
                     Err(e) => {
