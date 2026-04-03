@@ -7,7 +7,6 @@ use axum::{
     Router,
 };
 use tokio::sync::RwLock;
-use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::models::{CreateDownloadRequest, Download, DownloadProgress, DownloadStatus};
@@ -24,6 +23,7 @@ struct BatchResult {
 #[derive(serde::Serialize)]
 struct Settings {
     max_concurrent: usize,
+    active_downloads: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -39,6 +39,7 @@ pub fn router() -> Router<SharedState> {
         .route("/api/downloads", get(list_downloads))
         .route("/api/downloads", post(create_download))
         .route("/api/downloads/batch", post(create_batch_downloads))
+        .route("/api/downloads/all", delete(delete_all_downloads))
         .route("/api/downloads/:id", get(get_download))
         .route("/api/downloads/:id", delete(delete_download))
         .route("/api/downloads/:id/file", delete(delete_download_with_file))
@@ -52,8 +53,13 @@ async fn health_check() -> &'static str {
 
 async fn get_settings(State(state): State<SharedState>) -> Json<Settings> {
     let state = state.read().await;
+    let active_downloads = state.downloads
+        .values()
+        .filter(|d| d.status == DownloadStatus::Downloading)
+        .count();
     Json(Settings {
         max_concurrent: state.max_concurrent,
+        active_downloads,
     })
 }
 
@@ -72,8 +78,14 @@ async fn update_settings(
 
     tracing::info!("Settings updated: max_concurrent={}", state.max_concurrent);
 
+    let active_downloads = state.downloads
+        .values()
+        .filter(|d| d.status == DownloadStatus::Downloading)
+        .count();
+
     Ok(Json(Settings {
         max_concurrent: state.max_concurrent,
+        active_downloads,
     }))
 }
 
@@ -105,19 +117,31 @@ async fn create_download(
     };
     let state_clone = state.clone();
 
+    let download = {
+        let state = state_clone.read().await;
+        state.get_download(download_id).cloned().unwrap()
+    };
+    let download_dir = {
+        let state = state_clone.read().await;
+        state.download_dir.clone()
+    };
+
+    let downloader_clone = downloader.clone();
+    let state_for_callback = state_clone.clone();
+    let state_for_result = state_clone.clone();
+    let semaphore_clone = semaphore.clone();
+
     tokio::spawn(async move {
-        let permit = semaphore.acquire().await.unwrap();
+        let has_permit = semaphore_clone.try_acquire().is_ok();
+        if !has_permit {
+            let mut state = state_for_callback.write().await;
+            if let Some(d) = state.get_download_mut(download_id) {
+                d.status = DownloadStatus::Queued;
+            }
+            state.save_to_file().await;
+            return;
+        }
 
-        let download = {
-            let state = state_clone.read().await;
-            state.get_download(download_id).cloned().unwrap()
-        };
-        let download_dir = {
-            let state = state_clone.read().await;
-            state.download_dir.clone()
-        };
-
-        let state_for_callback = state_clone.clone();
         let progress_callback = move |d: Download| {
             let state_inner = state_for_callback.clone();
             let downloaded = d.clone();
@@ -130,9 +154,9 @@ async fn create_download(
             });
         };
 
-        let result = downloader.start_download(download, download_dir, progress_callback, permit).await;
+        let result = downloader_clone.start_download(download, download_dir, progress_callback, semaphore_clone).await;
 
-        let mut state = state_clone.write().await;
+        let mut state = state_for_result.write().await;
         if let Some(d) = state.get_download_mut(download_id) {
             if let Ok(completed) = result {
                 *d = completed;
@@ -191,6 +215,14 @@ async fn delete_download_with_file(
     }
 }
 
+async fn delete_all_downloads(State(state): State<SharedState>) -> Json<usize> {
+    let mut state = state.write().await;
+    let count = state.downloads.len();
+    state.downloads.clear();
+    state.save_to_file().await;
+    Json(count)
+}
+
 async fn cancel_download(
     State(state): State<SharedState>,
     Path(id): Path<Uuid>,
@@ -246,19 +278,26 @@ async fn retry_download(
     };
     let state_clone = state.clone();
 
+    let download = {
+        let state = state_clone.read().await;
+        state.get_download(download_id).cloned().unwrap()
+    };
+    let download_dir = {
+        let state = state_clone.read().await;
+        state.download_dir.clone()
+    };
+
+    let downloader_clone = downloader.clone();
+    let state_for_callback = state_clone.clone();
+    let state_for_result = state_clone.clone();
+    let semaphore_clone = semaphore.clone();
+
     tokio::spawn(async move {
-        let permit = semaphore.acquire().await.unwrap();
+        let has_permit = semaphore_clone.try_acquire().is_ok();
+        if !has_permit {
+            return;
+        }
 
-        let download = {
-            let state = state_clone.read().await;
-            state.get_download(download_id).cloned().unwrap()
-        };
-        let download_dir = {
-            let state = state_clone.read().await;
-            state.download_dir.clone()
-        };
-
-        let state_for_callback = state_clone.clone();
         let progress_callback = move |d: Download| {
             let state_inner = state_for_callback.clone();
             let downloaded = d.clone();
@@ -271,9 +310,9 @@ async fn retry_download(
             });
         };
 
-        let result = downloader.start_download(download, download_dir, progress_callback, permit).await;
+        let result = downloader_clone.start_download(download, download_dir, progress_callback, semaphore_clone).await;
 
-        let mut state = state_clone.write().await;
+        let mut state = state_for_result.write().await;
         if let Some(d) = state.get_download_mut(download_id) {
             if let Ok(completed) = result {
                 *d = completed;
@@ -342,9 +381,13 @@ async fn create_batch_downloads(
             };
             let state_for_callback = state_clone.clone();
             let download_id_for_handler = download_id;
+            let semaphore_for_handler = semaphore.clone();
 
             let handle = tokio::spawn(async move {
-                let permit = semaphore.acquire().await.unwrap();
+                let has_permit = semaphore_for_handler.try_acquire().is_ok();
+                if !has_permit {
+                    return; // Skip if no permit available, stays queued
+                }
 
                 let download = {
                     let state = state_for_callback.read().await;
@@ -370,7 +413,7 @@ async fn create_batch_downloads(
                     });
                 };
 
-                let result = downloader.start_download(download_for_callback, download_dir, progress_callback, permit).await;
+                let result = downloader.start_download(download_for_callback, download_dir, progress_callback, semaphore_for_handler).await;
 
                 let mut state = state_for_callback.write().await;
                 if let Some(d) = state.get_download_mut(download_id_for_handler) {

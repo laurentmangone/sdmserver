@@ -162,6 +162,26 @@ async function retryDownload(id) {
     }
 }
 
+async function clearAllDownloads() {
+    if (allDownloads.length === 0) return;
+    
+    if (!confirm(`Are you sure you want to clear all ${allDownloads.length} downloads?`)) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/downloads/all`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            await updateUI();
+        } else {
+            alert('Failed to clear downloads');
+        }
+    } catch (error) {
+        alert('Error: ' + error.message);
+    }
+}
+
 async function checkHealth() {
     const healthEl = document.getElementById('health');
     const dot = healthEl.querySelector('.status-dot');

@@ -399,6 +399,23 @@ button:disabled {
     gap: 0.5rem;
 }
 
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.btn-clear-all {
+    background-color: var(--error);
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+}
+
+.btn-clear-all:hover {
+    background-color: #dc2626;
+}
+
 .filter-buttons {
     display: flex;
     gap: 0.5rem;

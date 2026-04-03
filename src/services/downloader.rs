@@ -60,8 +60,9 @@ impl Downloader {
         mut download: Download,
         output_dir: PathBuf,
         progress_callback: impl Fn(Download) + Send + 'static,
-        _permit: tokio::sync::SemaphorePermit<'_>,
+        semaphore: Arc<tokio::sync::Semaphore>,
     ) -> Result<Download, String> {
+        let _permit = semaphore.acquire().await.map_err(|e| e.to_string())?;
         let cancel_flag = self.register_download(download.id);
 
         download.status = DownloadStatus::Downloading;

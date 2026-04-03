@@ -55,12 +55,15 @@
             <section class="downloads-list">
                 <div class="downloads-header">
                     <h2>Downloads</h2>
-                    <div class="filter-buttons">
-                        <button class="filter-btn active" data-filter="all">All <span class="count">(0)</span></button>
-                        <button class="filter-btn" data-filter="queued">Queued <span class="count">(0)</span></button>
-                        <button class="filter-btn" data-filter="downloading">Downloading <span class="count">(0)</span></button>
-                        <button class="filter-btn" data-filter="completed">Completed <span class="count">(0)</span></button>
-                        <button class="filter-btn" data-filter="failed">Failed <span class="count">(0)</span></button>
+                    <div class="header-actions">
+                        <button class="btn-clear-all" onclick="clearAllDownloads()">Clear All</button>
+                        <div class="filter-buttons">
+                            <button class="filter-btn active" data-filter="all">All <span class="count">(0)</span></button>
+                            <button class="filter-btn" data-filter="queued">Queued <span class="count">(0)</span></button>
+                            <button class="filter-btn" data-filter="downloading">Downloading <span class="count">(0)</span></button>
+                            <button class="filter-btn" data-filter="completed">Completed <span class="count">(0)</span></button>
+                            <button class="filter-btn" data-filter="failed">Failed <span class="count">(0)</span></button>
+                        </div>
                     </div>
                 </div>
                 <div id="downloads-container">
@@ -70,6 +73,6 @@
         </main>
     </div>
 
-    <script src="/app.js?v=14"></script>
+    <script src="/app.js?v=15"></script>
 </body>
 </html>

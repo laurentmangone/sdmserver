@@ -14,6 +14,7 @@ use axum::response::Html;
 use axum::response::IntoResponse;
 
 use state::AppState;
+use models::{Download, DownloadStatus};
 
 async fn index() -> impl IntoResponse {
     match tokio::fs::read_to_string("/app/static/index.html").await {
@@ -67,6 +68,72 @@ async fn main() {
             state.download_dir.display(), state.max_concurrent, 3600);
     }
     state.write().await.load_from_file().await;
+
+    let state_for_processor = state.clone();
+    tokio::spawn(async move {
+        let state_for_processor = state_for_processor;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            
+            let (semaphore, download, download_dir, downloader, download_id) = {
+                let state = state_for_processor.read().await;
+                
+                let active_count = state.downloads
+                    .values()
+                    .filter(|d| d.status == DownloadStatus::Downloading)
+                    .count();
+                
+                if active_count >= state.max_concurrent {
+                    continue;
+                }
+                
+                let pending_id = state.downloads
+                    .iter()
+                    .find(|(_, d)| d.status == DownloadStatus::Queued)
+                    .map(|(id, _)| *id);
+                
+                if pending_id.is_none() {
+                    continue;
+                }
+                
+                let download_id = pending_id.unwrap();
+                let dl = state.downloads.get(&download_id).cloned();
+                if dl.is_none() {
+                    continue;
+                }
+                
+                (state.download_semaphore.clone(), dl.unwrap(), state.download_dir.clone(), state.downloader.clone(), download_id)
+            };
+
+            let state = state_for_processor.clone();
+            let semaphore_clone = semaphore.clone();
+            
+            tokio::spawn(async move {
+                let state_for_callback = state.clone();
+                let progress_callback = move |d: Download| {
+                    let state_inner = state_for_callback.clone();
+                    let downloaded = d.clone();
+                    tokio::spawn(async move {
+                        let mut s = state_inner.write().await;
+                        if let Some(item) = s.get_download_mut(downloaded.id) {
+                            *item = downloaded;
+                        }
+                        s.save_to_file().await;
+                    });
+                };
+
+                let result = downloader.start_download(download, download_dir, progress_callback, semaphore_clone).await;
+
+                let mut s = state.write().await;
+                if let Some(item) = s.get_download_mut(download_id) {
+                    if let Ok(completed) = result {
+                        *item = completed;
+                    }
+                }
+                s.save_to_file().await;
+            });
+        }
+    });
 
     let state_clone = state.clone();
 
